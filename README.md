@@ -161,7 +161,7 @@ iq-modulation-classification/
 ## Getting started
 
 ```bash
-git clone https://github.com/<your-username>/iq-modulation-classification.git
+git clone https://github.com/sohui-lee-HH/iq-modulation-classification.git
 cd iq-modulation-classification
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -214,4 +214,4 @@ automatically if available.
 ## Author
 
 **Sohui** — M.Sc. Microelectronics and Microsystems (signal processing & communications), TUHH Hamburg
-[LinkedIn](https://www.linkedin.com/in/<your-profile>) · [GitHub](https://github.com/<your-username>)
+[LinkedIn](https://www.linkedin.com/in/sohui-lee-59b625296) · [GitHub](https://github.com/sohui-lee-HH)
