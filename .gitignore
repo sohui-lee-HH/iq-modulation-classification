@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Model weights (regenerate with train.py)
+*.pt
+*.pth
+
+# Extra experiment outputs — commit only the curated results/ figures
+results_*/
+runs/
+
+# Notebooks / editors / OS
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.DS_Store
