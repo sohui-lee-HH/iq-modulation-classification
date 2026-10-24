@@ -17,27 +17,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn as nn
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import train_test_split
 
 from iqmodrec import CLASSES, IQCNN, cumulant_features, generate
-
-
-# ---------------------------------------------------------------- helpers
-def accuracy_by_snr(pred, y, snr):
-    levels = np.unique(snr)
-    return levels, np.array([(pred[snr == s] == y[snr == s]).mean() for s in levels])
-
-
-def predict(model, X, device, bs=1024):
-    model.eval()
-    out = []
-    with torch.no_grad():
-        for i in range(0, len(X), bs):
-            out.append(model(torch.from_numpy(X[i:i + bs]).to(device)).argmax(1).cpu())
-    return torch.cat(out).numpy()
+from iqmodrec.training import accuracy_by_snr, predict, train_model
 
 
 # ---------------------------------------------------------------- main
@@ -67,38 +52,8 @@ def main():
     # ---- CNN training
     model = IQCNN(len(CLASSES)).to(device)
     print(f"model parameters: {sum(p.numel() for p in model.parameters()):,}")
-    opt = torch.optim.AdamW(model.parameters(), lr=2e-3, weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.OneCycleLR(
-        opt, max_lr=2e-3, total_steps=args.epochs * int(np.ceil(len(tr) / 256)))
-    loss_fn = nn.CrossEntropyLoss()
-
-    Xtr, ytr = torch.from_numpy(X[tr]), torch.from_numpy(y[tr])
-    best_va, history = 0.0, []
-    for ep in range(args.epochs):
-        model.train()
-        perm = torch.randperm(len(tr))
-        tot = 0.0
-        for i in range(0, len(tr), 256):
-            b = perm[i:i + 256]
-            xb, yb = Xtr[b].to(device), ytr[b].to(device)
-            # augmentation: random phase rotation (the channel does this anyway)
-            th = torch.rand(len(xb), 1, device=device) * 2 * np.pi
-            c, s = torch.cos(th), torch.sin(th)
-            xb = torch.stack([c * xb[:, 0] - s * xb[:, 1], s * xb[:, 0] + c * xb[:, 1]], 1)
-            loss = loss_fn(model(xb), yb)
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-            sched.step()
-            tot += loss.item() * len(b)
-        va_acc = (predict(model, X[va], device) == y[va]).mean()
-        history.append({"epoch": ep + 1, "train_loss": tot / len(tr), "val_acc": float(va_acc)})
-        print(f"epoch {ep + 1:2d}  loss {tot / len(tr):.3f}  val acc {va_acc:.3f}")
-        if va_acc > best_va:
-            best_va = va_acc
-            torch.save(model.state_dict(), f"{args.out}/iqcnn.pt")
-
-    model.load_state_dict(torch.load(f"{args.out}/iqcnn.pt"))
+    model, history = train_model(model, X[tr], y[tr], X[va], y[va], epochs=args.epochs,
+                                 device=device, ckpt=f"{args.out}/iqcnn.pt")
     pred_cnn = predict(model, X[te], device)
 
     # ---- cumulant baseline

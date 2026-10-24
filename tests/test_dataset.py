@@ -61,3 +61,51 @@ def test_model_forward_any_length():
     for L in (128, 1024):
         out = model(torch.randn(4, 2, L))
         assert out.shape == (4, len(CLASSES))
+
+
+# ---------------------------------------------------------------- impairments
+from iqmodrec.dataset import AUGMENT, TARGET, iq_imbalance, multipath, phase_noise
+from iqmodrec.training import adapt_batchnorm
+
+
+def test_multipath_preserves_average_power():
+    rng = np.random.default_rng(2)
+    x = np.exp(1j * rng.uniform(0, 2 * np.pi, 50_000))
+    powers = [np.mean(np.abs(multipath(x, rng)) ** 2) for _ in range(200)]
+    assert abs(np.mean(powers) - 1.0) < 0.02  # unit-energy impulse response
+
+
+def test_phase_noise_keeps_envelope():
+    rng = np.random.default_rng(3)
+    x = np.exp(1j * rng.uniform(0, 2 * np.pi, 1000))
+    assert np.allclose(np.abs(phase_noise(x, rng)), 1.0)
+
+
+def test_iq_imbalance_identity_and_image():
+    rng = np.random.default_rng(4)
+    n = np.arange(4096)
+    tone = np.exp(2j * np.pi * 0.1 * n)
+    assert np.allclose(iq_imbalance(tone, rng, amp_db=(0, 0), phase_deg=(0, 0)), tone)
+    # imbalance creates an image at -f
+    spec = np.abs(np.fft.fft(iq_imbalance(tone, rng)))
+    k = int(0.1 * len(n))
+    assert spec[-k] > 1e-3 * spec[k]
+
+
+def test_impaired_dataset_and_awgn_reproducible():
+    X1, _, _ = generate(n_per_class_per_snr=2, snrs=[10], impairments=TARGET)
+    X2, _, _ = generate(n_per_class_per_snr=2, snrs=[10], impairments=AUGMENT)
+    assert X1.shape == X2.shape and np.isfinite(X1).all() and np.isfinite(X2).all()
+    A, _, _ = generate(n_per_class_per_snr=2, snrs=[10], seed=5)
+    B, _, _ = generate(n_per_class_per_snr=2, snrs=[10], seed=5)
+    assert np.array_equal(A, B)
+
+
+def test_adabn_changes_only_bn_statistics():
+    model = IQCNN(len(CLASSES)).eval()
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+    adapt_batchnorm(model, np.random.randn(64, 2, 128).astype(np.float32))
+    after = model.state_dict()
+    for k in before:
+        same = torch.equal(before[k], after[k])
+        assert same == ("running" not in k and "num_batches" not in k), k

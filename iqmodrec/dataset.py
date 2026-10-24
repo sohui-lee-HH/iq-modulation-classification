@@ -94,23 +94,98 @@ def modulate(name: str, n_samples: int, sps: int, rng: np.random.Generator) -> n
     return np.exp(1j * phase)
 
 
+# ---------------------------------------------------------------- impairments
+def multipath(x: np.ndarray, rng: np.random.Generator, delay_spread=(1.0, 4.0),
+              k_factor=(0.0, 5.0), max_delay: int = 12) -> np.ndarray:
+    """Tapped-delay-line fading channel, one realisation per frame.
+
+    Taps at 1-sample spacing with an exponential power-delay profile
+    (rms delay spread tau in samples). The first tap is Rician with factor K
+    (line of sight + diffuse part); all others are Rayleigh. The impulse
+    response is normalised to unit energy so that the average received
+    power, and therefore the SNR definition, is unchanged.
+    """
+    tau = rng.uniform(*delay_spread)
+    K = rng.uniform(*k_factor)
+    d = np.arange(max_delay + 1)
+    pdp = np.exp(-d / tau)
+    diffuse = (rng.standard_normal(len(d)) + 1j * rng.standard_normal(len(d))) / np.sqrt(2)  # CN(0, 1)
+    los = np.exp(1j * rng.uniform(0, 2 * np.pi))
+    h = np.sqrt(pdp) * diffuse
+    h[0] = np.sqrt(pdp[0]) * (np.sqrt(K / (K + 1)) * los + np.sqrt(1 / (K + 1)) * diffuse[0])
+    h = h / np.linalg.norm(h)
+    return np.convolve(x, h)[:len(x)]
+
+
+def phase_noise(x: np.ndarray, rng: np.random.Generator, sigma=(0.01, 0.03)) -> np.ndarray:
+    """Oscillator phase noise as a Wiener process (random walk), sigma in rad/sample."""
+    s = rng.uniform(*sigma)
+    return x * np.exp(1j * np.cumsum(s * rng.standard_normal(len(x))))
+
+
+def iq_imbalance(x: np.ndarray, rng: np.random.Generator, amp_db=(0.5, 1.5),
+                 phase_deg=(3.0, 10.0)) -> np.ndarray:
+    """Receiver IQ imbalance: Q branch has gain g and phase skew phi relative to I.
+
+    Equivalent to y = mu*x + nu*conj(x): creates an image of the signal.
+    g = 1, phi = 0 is the identity.
+    """
+    g = 10 ** (rng.choice([-1, 1]) * rng.uniform(*amp_db) / 20)
+    phi = np.deg2rad(rng.choice([-1, 1]) * rng.uniform(*phase_deg))
+    return x.real + 1j * g * (x.imag * np.cos(phi) + x.real * np.sin(phi))
+
+
+# Two impairment profiles used in experiments/domain_shift.py.
+# TARGET: the "deployment" channel -- every impairment always present.
+# AUGMENT: what we can model at training time -- each impairment applied with
+# probability p and with deliberately wider, different parameter ranges.
+TARGET = {
+    "p": 1.0,
+    "multipath": {"delay_spread": (1.0, 4.0), "k_factor": (0.0, 5.0), "max_delay": 12},
+    "phase_noise": {"sigma": (0.01, 0.03)},
+    "iq": {"amp_db": (0.5, 1.5), "phase_deg": (3.0, 10.0)},
+}
+AUGMENT = {
+    "p": 0.7,
+    "multipath": {"delay_spread": (0.5, 6.0), "k_factor": (0.0, 10.0), "max_delay": 16},
+    "phase_noise": {"sigma": (0.0, 0.05)},
+    "iq": {"amp_db": (0.0, 2.0), "phase_deg": (0.0, 15.0)},
+}
+
+
 # ---------------------------------------------------------------- channel
 def channel(x: np.ndarray, snr_db: float, rng: np.random.Generator,
-            max_cfo: float = 0.01) -> np.ndarray:
-    """Carrier frequency offset, random phase and AWGN.
+            max_cfo: float = 0.01, impairments: dict | None = None) -> np.ndarray:
+    """Optional multipath -> CFO + random phase (+ phase noise) -> AWGN (-> IQ imbalance).
 
     max_cfo is in cycles/sample (0.01 = 1 % of the sample rate).
     SNR is defined as average signal power / noise power over the full sampled band.
+    impairments: None (AWGN only) or a profile such as TARGET / AUGMENT.
     """
+    imp = impairments or {}
+    p = imp.get("p", 1.0)
+
+    def use(key):
+        return key in imp and rng.random() < p
+
+    if use("multipath"):
+        x = multipath(x, rng, **imp["multipath"])
+
     n = np.arange(len(x))
     cfo = rng.uniform(-max_cfo, max_cfo)
     phi = rng.uniform(0, 2 * np.pi)
     x = x * np.exp(1j * (2 * np.pi * cfo * n + phi))
+    if use("phase_noise"):
+        x = phase_noise(x, rng, **imp["phase_noise"])
 
     p_sig = np.mean(np.abs(x) ** 2)
     p_noise = p_sig / (10 ** (snr_db / 10))
     noise = np.sqrt(p_noise / 2) * (rng.standard_normal(len(x)) + 1j * rng.standard_normal(len(x)))
-    return x + noise
+    y = x + noise
+
+    if use("iq"):  # receiver front end, so it acts on signal + noise
+        y = iq_imbalance(y, rng, **imp["iq"])
+    return y
 
 
 # ---------------------------------------------------------------- dataset
@@ -118,7 +193,8 @@ def generate(n_per_class_per_snr: int = 400,
              snrs=range(-10, 21, 2),
              n_samples: int = 128,
              sps: int = 8,
-             seed: int = 0):
+             seed: int = 0,
+             impairments: dict | None = None):
     """Return X (N, 2, n_samples) float32, y (N,) int64, snr (N,) int."""
     rng = np.random.default_rng(seed)
     X, y, s = [], [], []
@@ -126,7 +202,7 @@ def generate(n_per_class_per_snr: int = 400,
         for snr in snrs:
             for _ in range(n_per_class_per_snr):
                 clean = modulate(name, n_samples, sps, rng)
-                noisy = channel(clean, snr, rng)
+                noisy = channel(clean, snr, rng, impairments=impairments)
                 # random timing offset: start anywhere after the filter transient
                 start = rng.integers(8 * sps, len(noisy) - n_samples - 8 * sps)
                 seg = noisy[start:start + n_samples]

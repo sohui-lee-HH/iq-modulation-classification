@@ -1,0 +1,42 @@
+{
+  "config": {
+    "quick": true,
+    "per_snr": 40,
+    "test_per_snr": 20,
+    "ft_per_snr": 10,
+    "epochs": 3,
+    "out": "results/domain_shift"
+  },
+  "results": {
+    "A  Source only (AWGN)": {
+      "source_overall": 0.588671875,
+      "source_snr>=10dB": 0.7385416666666667,
+      "target_overall": 0.43125,
+      "target_snr>=10dB": 0.5
+    },
+    "B  + AdaBN (unlabelled target)": {
+      "source_overall": 0.55859375,
+      "source_snr>=10dB": 0.7010416666666667,
+      "target_overall": 0.4390625,
+      "target_snr>=10dB": 0.5197916666666667
+    },
+    "C  + Fine-tuning (4 % labelled target)": {
+      "source_overall": 0.55625,
+      "source_snr>=10dB": 0.6802083333333333,
+      "target_overall": 0.462109375,
+      "target_snr>=10dB": 0.55
+    },
+    "D  Impairment augmentation": {
+      "source_overall": 0.53203125,
+      "source_snr>=10dB": 0.64375,
+      "target_overall": 0.44140625,
+      "target_snr>=10dB": 0.5229166666666667
+    },
+    "O  Oracle (trained on target)": {
+      "source_overall": 0.4890625,
+      "source_snr>=10dB": 0.590625,
+      "target_overall": 0.41875,
+      "target_snr>=10dB": 0.490625
+    }
+  }
+}

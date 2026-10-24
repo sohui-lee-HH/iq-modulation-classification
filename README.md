@@ -9,6 +9,11 @@ baseband (IQ) samples, using a 1D convolutional neural network, compared against
 a classical higher-order-cumulant baseline. The signal generator, channel model,
 features and network are all implemented from scratch in NumPy and PyTorch.
 
+**Highlights**
+- 94 % accuracy at SNR ≥ 10 dB and 3× the cumulant baseline at 0 dB
+- [Experiment 1](#experiment-1-observation-length): longer observation fixes most of the QAM confusion and almost doubles accuracy at −10 dB
+- [Experiment 2](#experiment-2-domain-shift-to-a-realistic-channel): an AWGN-trained model loses 40 points on a multipath/phase-noise/IQ-imbalance channel. Physically modelled augmentation recovers it to oracle level without target data, and AdaBN recovers 9 points without labels
+
 <p align="center">
   <img src="results/accuracy_vs_snr.png" width="600" alt="Accuracy vs SNR">
 </p>
@@ -35,7 +40,44 @@ features and network are all implemented from scratch in NumPy and PyTorch.
   <img src="results/confusion.png" width="850" alt="Confusion matrices">
 </p>
 
-<!-- LENGTH_STUDY -->
+## Experiment 1: Observation length
+
+**Question:** is the 16QAM ↔ 64QAM confusion a limit of the model, or of the
+16-symbol frame?
+
+**Method:** generate 1024-sample frames once, then train the same CNN and the
+cumulant baseline on the first 128, 256, 512 and 1024 samples of the *same*
+frames. Only the observation length changes. (Smaller training set than the
+main run, 100 frames per class per SNR and 10 epochs, so absolute numbers are
+lower than in the table above.)
+
+| Frame | Symbols | CNN, all classes ≥ 10 dB | CNN, 16/64QAM ≥ 10 dB | Cumulants ≥ 10 dB | CNN at −10 dB | CPU latency / frame |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| 128 | 16 | 81.7 % | 52.5 % | 76.9 % | 25.6 % | 0.28 ms |
+| 256 | 32 | 85.6 % | 55.4 % | 79.9 % | 30.6 % | 0.45 ms |
+| 512 | 64 | 90.7 % | 65.0 % | 83.3 % | 42.5 % | 1.1 ms |
+| 1024 | 128 | **92.9 %** | **72.1 %** | 86.9 % | **45.6 %** | 1.6 ms |
+
+<p align="center">
+  <img src="results/length_study/length_study.png" width="850" alt="Length study">
+</p>
+
+**Findings**
+- **The hypothesis holds, partly.** 16QAM/64QAM accuracy rises by 20 points from
+  16 to 128 symbols, which is the largest gain of any class pair. But at 128
+  symbols it is still only 72 %, so frame length is one cause, not the only one.
+- **Longer frames help most at low SNR.** At −10 dB accuracy almost doubles
+  (26 % → 46 %): more samples means more integration gain.
+- **Cumulants are more data-efficient.** With this small training set they beat
+  the CNN on 16QAM/64QAM at short frames. The CNN only overtakes them at 128 symbols.
+- **The cost is latency.** 8× more samples gives ~6× more CPU time per frame,
+  which matters in real-time or resource-limited receivers.
+- Curves per SNR point are noisy (±3 %) because each point has only 160 test frames.
+
+```bash
+python experiments/length_study.py   # ~40 min on a 2-core CPU
+```
+
 
 ## Experiment 2: Domain shift to a realistic channel
 
@@ -149,11 +191,18 @@ iq-modulation-classification/
 ├── iqmodrec/              # Python package
 │   ├── dataset.py         #   modulators, RRC/Gaussian filters, channel, dataset generator
 │   ├── cumulants.py       #   higher-order-statistics feature baseline
-│   └── model.py           #   1D CNN
+│   ├── model.py           #   1D CNN
+│   └── training.py        #   training loop, inference, AdaBN domain adaptation
+├── experiments/
+│   ├── length_study.py    # Experiment 1: frame length 128 → 1024 samples
+│   └── domain_shift.py    # Experiment 2: AWGN → multipath / phase noise / IQ imbalance
 ├── tests/
-│   └── test_dataset.py    # sanity checks: SNR calibration, unit power, filter energy, shapes
-├── results/               # figures and metrics from the reference run
-├── train.py               # data generation → training → evaluation → plots
+│   └── test_dataset.py    # 13 checks: SNR calibration, power, filters, impairments, AdaBN
+├── results/               # figures and metrics from the reference runs
+│   ├── length_study/
+│   └── domain_shift/
+├── train.py               # main run: data → training → evaluation → plots
+├── pyproject.toml         # pytest configuration
 ├── requirements.txt
 └── LICENSE
 ```
@@ -161,16 +210,19 @@ iq-modulation-classification/
 ## Getting started
 
 ```bash
-git clone https://github.com/sohui-lee-HH/iq-modulation-classification.git
+git clone https://github.com/<your-username>/iq-modulation-classification.git
 cd iq-modulation-classification
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-pytest                         # 8 sanity checks, ~2 s
-python train.py --quick        # smoke test, ~1 min on CPU
-python train.py                # full run, ~15 min on a 2-core CPU
-python train.py --length 1024  # longer frames
+pytest                                   # 13 checks, ~5 s
+python train.py --quick --out results_quick   # smoke test, ~1 min on CPU
+python train.py                          # main run, ~15 min on a 2-core CPU
+python experiments/length_study.py       # Experiment 1, ~40 min
+python experiments/domain_shift.py       # Experiment 2, ~30 min
 ```
+
+Every script accepts `--quick` for a short smoke test and `--out` for the output folder.
 
 `train.py` writes `accuracy_vs_snr.png`, `confusion.png`, `examples.png`,
 `summary.json` (per-SNR accuracy and training history) and the model weights
@@ -189,29 +241,37 @@ automatically if available.
 - **Classical baseline.** Comparing against cumulants shows where deep learning
   actually helps (low SNR, short frames) and where hand-crafted features are
   already sufficient (FSK vs linear modulations at high SNR).
+- **Physically modelled impairments.** Multipath, phase noise and IQ imbalance
+  are implemented from their signal models (tapped delay line, Wiener process,
+  `μx + νx*`), so augmentation ranges have a physical meaning and can be
+  matched to a real front end.
 
 ## Limitations
 
-- AWGN channel only; no multipath fading, IQ imbalance, phase noise or
-  sample-rate offset.
+- No equalisation or synchronisation stage; no sample-rate offset or
+  interfering signals in the channel model.
 - Fixed oversampling (8 samples/symbol); a real receiver sees unknown symbol rates.
 - Synthetic data only; no over-the-air captures yet.
+- Single training seed per configuration; differences of a few points are
+  within run-to-run variation.
 
 ## Next steps
 
-- [ ] Frame length study: 128 vs 1024 samples, to test the 16QAM/64QAM explanation
-- [ ] Rayleigh/Rician multipath and IQ imbalance in the channel model
+- [x] Frame length study: 128 → 1024 samples ([Experiment 1](#experiment-1-observation-length))
+- [x] Multipath, phase noise and IQ imbalance; domain adaptation ([Experiment 2](#experiment-2-domain-shift-to-a-realistic-channel))
+- [ ] Architecture and representation comparison: CNN vs LSTM vs Transformer, raw IQ vs spectrogram
+- [ ] Emitter identification (RF fingerprinting) from simulated hardware impairments
 - [ ] Evaluation on RadioML 2018.01A (24 classes, over-the-air effects)
-- [ ] Architecture comparison: ResNet, LSTM, Transformer
-- [ ] Real captures with an RTL-SDR or HackRF
+- [ ] Real captures with an RTL-SDR
 
 ## References
 
 1. T. J. O'Shea, J. Corgan, T. C. Clancy, "Convolutional Radio Modulation Recognition Networks," *EANN*, 2016.
 2. T. J. O'Shea, T. Roy, T. C. Clancy, "Over-the-Air Deep Learning Based Radio Signal Classification," *IEEE J. Sel. Topics Signal Process.*, 2018.
 3. A. Swami, B. M. Sadler, "Hierarchical Digital Modulation Classification Using Cumulants," *IEEE Trans. Commun.*, 2000.
+4. Y. Li, N. Wang, J. Shi, J. Liu, X. Hou, "Revisiting Batch Normalization for Practical Domain Adaptation" (AdaBN), *arXiv:1603.04779*, 2016.
 
 ## Author
 
 **Sohui** — M.Sc. Microelectronics and Microsystems (signal processing & communications), TUHH Hamburg
-[LinkedIn](https://www.linkedin.com/in/sohui-lee-59b625296) · [GitHub](https://github.com/sohui-lee-HH)
+[LinkedIn](https://www.linkedin.com/in/<your-profile>) · [GitHub](https://github.com/<your-username>)
